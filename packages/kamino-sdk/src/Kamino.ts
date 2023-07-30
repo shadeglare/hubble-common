@@ -99,6 +99,7 @@ import {
   DECIMALS_SOL,
   InstructionsWithLookupTables,
   PendingFeesAndRewards,
+  NativePendingFeesAndRewards,
 } from './utils';
 import { ASSOCIATED_TOKEN_PROGRAM_ID, Token, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import {
@@ -4427,12 +4428,18 @@ export class Kamino {
    * @returns The pending fees and rewards that haven't been compounded yet.
    */
   async getPendingFeesAndRewards(strategy: WhirlpoolStrategy): Promise<PendingFeesAndRewards | null> {
+    const nativeFeesAndRewards = await this.getNativePendingFeesAndRewards(strategy);
+    // TODO: Implement kRewards for Kamino incentivized vaults.
+    return nativeFeesAndRewards ? { ...nativeFeesAndRewards, kRewardAmounts: [] } : nativeFeesAndRewards;
+  }
+
+  private async getNativePendingFeesAndRewards(strategy: WhirlpoolStrategy): Promise<NativePendingFeesAndRewards | null> {
     const { strategyDex, position } = strategy;
     const dexNo = strategyDex.toNumber();
 
-    if (dexToNumber("RAYDIUM") === dexNo) {
+    if (dexToNumber('RAYDIUM') === dexNo) {
       return await this._raydiumService.getPositionPendingFeesAndRewards(position);
-    } else if (dexToNumber("ORCA") === dexNo) {
+    } else if (dexToNumber('ORCA') === dexNo) {
       // It's not an exception just no data for Orca.
       return null;
     } else {
@@ -4469,7 +4476,8 @@ export class Kamino {
     return {
       tokenFeeAmountA: allFeesAndRewards.tokenFeeAmountA.mul(shareRatio).round(),
       tokenFeeAmountB: allFeesAndRewards.tokenFeeAmountB.mul(shareRatio).round(),
-      rewardAmounts: allFeesAndRewards.rewardAmounts.map(r => r.mul(shareRatio).round())
+      rewardAmounts: allFeesAndRewards.rewardAmounts.map(r => r.mul(shareRatio).round()),
+      kRewardAmounts: allFeesAndRewards.kRewardAmounts.map(r => r.mul(shareRatio).round()),
     };
   }
 }

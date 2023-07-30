@@ -26,7 +26,7 @@ import {
   getStrategyPriceRangeRaydium,
   LiquidityDistribution,
   LiquidityForPrice,
-  PendingFeesAndRewards,
+  NativePendingFeesAndRewards,
   ZERO,
 } from '../utils';
 import { FullPercentage } from '../utils/CreationParameters';
@@ -329,7 +329,7 @@ export class RaydiumService {
     return positions.length;
   }
 
-  async getPositionPendingFeesAndRewards(position: PublicKey): Promise<PendingFeesAndRewards> {
+  async getPositionPendingFeesAndRewards(position: PublicKey): Promise<NativePendingFeesAndRewards> {
     const positionState = await PersonalPositionState.fetch(this._connection, position);
     if (positionState == null) {
       throw new Error(`Raydium position state ${position} does not exist`);

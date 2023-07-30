@@ -259,8 +259,12 @@ export interface InstructionsWithLookupTables {
   lookupTablesAddresses: PublicKey[];
 }
 
-export interface PendingFeesAndRewards {
+export interface NativePendingFeesAndRewards {
   tokenFeeAmountA: Decimal;
   tokenFeeAmountB: Decimal;
   rewardAmounts: Decimal[];
+}
+
+export interface PendingFeesAndRewards extends NativePendingFeesAndRewards {
+  kRewardAmounts: Decimal[];
 }

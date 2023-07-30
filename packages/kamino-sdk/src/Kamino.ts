@@ -98,7 +98,7 @@ import {
   lamportsToNumberDecimal,
   DECIMALS_SOL,
   InstructionsWithLookupTables,
-  RAYDIUM_DEVNET_PROGRAM_ID,
+  PendingFeesAndRewards,
 } from './utils';
 import { ASSOCIATED_TOKEN_PROGRAM_ID, Token, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import {
@@ -1707,12 +1707,12 @@ export class Kamino {
     let swapper: SwapperIxBuilder = swapIxsBuilder
       ? swapIxsBuilder
       : (
-          input: DepositAmountsForSwap,
-          tokenAMint: PublicKey,
-          tokenBMint: PublicKey,
-          user: PublicKey,
-          slippageBps: Decimal
-        ) => this.getJupSwapIxs(input, tokenAMint, tokenBMint, user, slippageBps, false);
+        input: DepositAmountsForSwap,
+        tokenAMint: PublicKey,
+        tokenBMint: PublicKey,
+        user: PublicKey,
+        slippageBps: Decimal
+      ) => this.getJupSwapIxs(input, tokenAMint, tokenBMint, user, slippageBps, false);
 
     return this.getSingleSidedDepositIxs(
       strategyWithAddress,
@@ -1766,12 +1766,12 @@ export class Kamino {
     let swapper: SwapperIxBuilder = swapIxsBuilder
       ? swapIxsBuilder
       : (
-          input: DepositAmountsForSwap,
-          tokenAMint: PublicKey,
-          tokenBMint: PublicKey,
-          user: PublicKey,
-          slippageBps: Decimal
-        ) => this.getJupSwapIxs(input, tokenAMint, tokenBMint, user, slippageBps, false);
+        input: DepositAmountsForSwap,
+        tokenAMint: PublicKey,
+        tokenBMint: PublicKey,
+        user: PublicKey,
+        slippageBps: Decimal
+      ) => this.getJupSwapIxs(input, tokenAMint, tokenBMint, user, slippageBps, false);
 
     return this.getSingleSidedDepositIxs(
       strategyWithAddress,
@@ -3446,10 +3446,10 @@ export class Kamino {
     priceUpper: Decimal,
     payer: PublicKey
   ) => [
-    await this.executiveWithdraw(strategy, new Rebalance()),
-    await this.collectFeesAndRewards(strategy),
-    await this.openPosition(strategy, newPosition, priceLower, priceUpper, new Rebalancing()),
-  ];
+      await this.executiveWithdraw(strategy, new Rebalance()),
+      await this.collectFeesAndRewards(strategy),
+      await this.openPosition(strategy, newPosition, priceLower, priceUpper, new Rebalancing()),
+    ];
 
   /**
    * Get a list of rebalancing params
@@ -4420,6 +4420,58 @@ export class Kamino {
       throw new Error(`Dex ${strategyState.strategyDex} not supported`);
     }
   };
+
+  /**
+   * Calculates all pending fees and rewards for a given strategy.
+   * @param strategy The strategy object.
+   * @returns The pending fees and rewards that haven't been compounded yet.
+   */
+  async getPendingFeesAndRewards(strategy: WhirlpoolStrategy): Promise<PendingFeesAndRewards | null> {
+    const { strategyDex, position } = strategy;
+    const dexNo = strategyDex.toNumber();
+
+    if (dexToNumber("RAYDIUM") === dexNo) {
+      return await this._raydiumService.getPositionPendingFeesAndRewards(position);
+    } else if (dexToNumber("ORCA") === dexNo) {
+      // It's not an exception just no data for Orca.
+      return null;
+    } else {
+      throw new Error(`Unsupported DEX: ${dexNo}`);
+    }
+  }
+
+  /**
+   * Calculates pending fees and rewards for a given strategy and a shares owner.
+   * @param strategy The strategy object.
+   * @param owner The owner public key (most time it's a wallet address).
+   * @returns The pending fees and rewards that haven't been compounded yet.
+   */
+  async getPendingFeesAndRewardsByOwner(
+    strategy: WhirlpoolStrategy,
+    owner: PublicKey,
+  ): Promise<PendingFeesAndRewards | null> {
+    const allFeesAndRewards = await this.getPendingFeesAndRewards(strategy);
+    if (allFeesAndRewards == null) {
+      return null;
+    }
+
+    const ownerSharesAta = await getAssociatedTokenAddress(strategy.sharesMint, owner);
+    const ownerShares = await this.getTokenAccountBalance(ownerSharesAta);
+    if (ownerShares.isZero()) {
+      throw new Error("Owner balance should be more than zero");
+    }
+
+    const sharesMintDecimals = new Decimal(strategy.sharesMintDecimals.toString())
+    const totalShares = new Decimal(strategy.sharesIssued.toString())
+      .dividedBy(new Decimal(10).pow(sharesMintDecimals));
+    const shareRatio = ownerShares.dividedBy(totalShares);
+
+    return {
+      tokenFeeAmountA: allFeesAndRewards.tokenFeeAmountA.mul(shareRatio).round(),
+      tokenFeeAmountB: allFeesAndRewards.tokenFeeAmountB.mul(shareRatio).round(),
+      rewardAmounts: allFeesAndRewards.rewardAmounts.map(r => r.mul(shareRatio).round())
+    };
+  }
 }
 
 export default Kamino;

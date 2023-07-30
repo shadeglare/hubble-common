@@ -1,13 +1,23 @@
+import axios from 'axios';
+import Decimal from 'decimal.js';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { SolanaCluster } from '@hubbleprotocol/hubble-config';
 import {
-  LiquidityDistribution as RaydiumLiquidityDistribuion,
+  AmmV3,
+  AmmV3PoolInfo,
+  PositionInfoLayout,
+  TickMath,
+  SqrtPriceMath,
+  getPdaTickArrayAddress,
+  TickUtils
+} from '@raydium-io/raydium-sdk';
+import {
   Pool,
   RaydiumPoolsResponse,
+  LiquidityDistribution as RaydiumLiquidityDistribution,
 } from './RaydiumPoolsResponse';
-import { PersonalPositionState, PoolState } from '../raydium_client';
-import Decimal from 'decimal.js';
-import { AmmV3, AmmV3PoolInfo, PositionInfoLayout, TickMath, SqrtPriceMath } from '@raydium-io/raydium-sdk';
+import { PersonalPositionState, PoolState, TickArrayState } from '../raydium_client';
+import { PROGRAM_ID as RAYDIUM_PROGRAM_ID } from '../raydium_client/programId';
 import { WhirlpoolAprApy } from './WhirlpoolAprApy';
 import { WhirlpoolStrategy } from '../kamino-client/accounts';
 import {
@@ -16,12 +26,15 @@ import {
   getStrategyPriceRangeRaydium,
   LiquidityDistribution,
   LiquidityForPrice,
+  PendingFeesAndRewards,
   ZERO,
 } from '../utils';
-import axios from 'axios';
 import { FullPercentage } from '../utils/CreationParameters';
-import { PROGRAM_ID as RAYDIUM_PROGRAM_ID } from '../raydium_client/programId';
-import { priceToTickIndexWithRounding } from '../utils/raydium';
+import {
+  getPositionFees,
+  getPositionRewards,
+  priceToTickIndexWithRounding
+} from '../utils/raydium';
 
 export class RaydiumService {
   private readonly _connection: Connection;
@@ -43,7 +56,7 @@ export class RaydiumService {
     highestTick?: number
   ): Promise<LiquidityDistribution> {
     let raydiumLiqDistribution = (
-      await axios.get<RaydiumLiquidityDistribuion>(`https://api.raydium.io/v2/ammV3/positionLine/${pool.toString()}`)
+      await axios.get<RaydiumLiquidityDistribution>(`https://api.raydium.io/v2/ammV3/positionLine/${pool.toString()}`)
     ).data;
 
     const poolState = await PoolState.fetch(this._connection, pool);
@@ -314,5 +327,52 @@ export class RaydiumService {
     });
 
     return positions.length;
+  }
+
+  async getPositionPendingFeesAndRewards(position: PublicKey): Promise<PendingFeesAndRewards> {
+    const positionState = await PersonalPositionState.fetch(this._connection, position);
+    if (positionState == null) {
+      throw new Error(`Raydium position state ${position} does not exist`);
+    }
+
+    const { poolId, tickLowerIndex, tickUpperIndex } = positionState;
+    const poolState = await PoolState.fetch(this._connection, poolId);
+    if (poolState == null) {
+      throw new Error(`Raydium pool state ${poolId} does not exist`);
+    }
+
+    const { tickSpacing } = poolState;
+    const tickArrayLowerStartIndex = TickUtils.getTickArrayStartIndexByTick(tickLowerIndex, tickSpacing);
+    const tickArrayUpperStartIndex = TickUtils.getTickArrayStartIndexByTick(tickUpperIndex, tickSpacing);
+
+    const tickArrayLowerAddress = getPdaTickArrayAddress(RAYDIUM_PROGRAM_ID, poolId, tickArrayLowerStartIndex);
+    const tickArrayUpperAddress = getPdaTickArrayAddress(RAYDIUM_PROGRAM_ID, poolId, tickArrayUpperStartIndex);
+    const [tickArrayLower, tickArrayUpper] = await Promise.all([
+      TickArrayState.fetch(this._connection, tickArrayLowerAddress.publicKey),
+      TickArrayState.fetch(this._connection, tickArrayUpperAddress.publicKey),
+    ]);
+    if (tickArrayLower == null) {
+      throw new Error(`Tick array lower for pool ${poolId} does not exist`);
+    }
+    if (tickArrayUpper == null) {
+      throw new Error(`Tick array upper for pool ${poolId} does not exist`);
+    }
+
+    const tickLowerState = tickArrayLower.ticks[TickUtils.getTickOffsetInArray(
+      positionState.tickLowerIndex,
+      poolState.tickSpacing
+    )];
+    const tickUpperState = tickArrayUpper.ticks[TickUtils.getTickOffsetInArray(
+      positionState.tickUpperIndex,
+      poolState.tickSpacing
+    )];
+
+    const fees = getPositionFees(poolState, positionState, tickLowerState, tickUpperState);
+    const rewards = getPositionRewards(poolState, positionState, tickLowerState, tickUpperState);
+    return {
+      tokenFeeAmountA: new Decimal(fees.tokenFeeAmount0.toString()),
+      tokenFeeAmountB: new Decimal(fees.tokenFeeAmount1.toString()),
+      rewardAmounts: rewards.map(r => new Decimal(r.toString())),
+    };
   }
 }

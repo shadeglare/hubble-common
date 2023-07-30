@@ -258,3 +258,9 @@ export interface InstructionsWithLookupTables {
   instructions: TransactionInstruction[];
   lookupTablesAddresses: PublicKey[];
 }
+
+export interface PendingFeesAndRewards {
+  tokenFeeAmountA: Decimal;
+  tokenFeeAmountB: Decimal;
+  rewardAmounts: Decimal[];
+}

@@ -9,7 +9,7 @@ import {
   TickMath,
   SqrtPriceMath,
   getPdaTickArrayAddress,
-  TickUtils
+  TickUtils,
 } from '@raydium-io/raydium-sdk';
 import {
   Pool,
@@ -30,11 +30,7 @@ import {
   ZERO,
 } from '../utils';
 import { FullPercentage } from '../utils/CreationParameters';
-import {
-  getPositionFees,
-  getPositionRewards,
-  priceToTickIndexWithRounding
-} from '../utils/raydium';
+import { getPositionFees, getPositionRewards, priceToTickIndexWithRounding } from '../utils/raydium';
 
 export class RaydiumService {
   private readonly _connection: Connection;
@@ -358,21 +354,17 @@ export class RaydiumService {
       throw new Error(`Tick array upper for pool ${poolId} does not exist`);
     }
 
-    const tickLowerState = tickArrayLower.ticks[TickUtils.getTickOffsetInArray(
-      positionState.tickLowerIndex,
-      poolState.tickSpacing
-    )];
-    const tickUpperState = tickArrayUpper.ticks[TickUtils.getTickOffsetInArray(
-      positionState.tickUpperIndex,
-      poolState.tickSpacing
-    )];
+    const tickLowerState =
+      tickArrayLower.ticks[TickUtils.getTickOffsetInArray(positionState.tickLowerIndex, poolState.tickSpacing)];
+    const tickUpperState =
+      tickArrayUpper.ticks[TickUtils.getTickOffsetInArray(positionState.tickUpperIndex, poolState.tickSpacing)];
 
     const fees = getPositionFees(poolState, positionState, tickLowerState, tickUpperState);
     const rewards = getPositionRewards(poolState, positionState, tickLowerState, tickUpperState);
     return {
       tokenFeeAmountA: new Decimal(fees.tokenFeeAmount0.toString()),
       tokenFeeAmountB: new Decimal(fees.tokenFeeAmount1.toString()),
-      rewardAmounts: rewards.map(r => new Decimal(r.toString())),
+      rewardAmounts: rewards.map((r) => new Decimal(r.toString())),
     };
   }
 }

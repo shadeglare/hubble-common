@@ -1708,12 +1708,12 @@ export class Kamino {
     let swapper: SwapperIxBuilder = swapIxsBuilder
       ? swapIxsBuilder
       : (
-        input: DepositAmountsForSwap,
-        tokenAMint: PublicKey,
-        tokenBMint: PublicKey,
-        user: PublicKey,
-        slippageBps: Decimal
-      ) => this.getJupSwapIxs(input, tokenAMint, tokenBMint, user, slippageBps, false);
+          input: DepositAmountsForSwap,
+          tokenAMint: PublicKey,
+          tokenBMint: PublicKey,
+          user: PublicKey,
+          slippageBps: Decimal
+        ) => this.getJupSwapIxs(input, tokenAMint, tokenBMint, user, slippageBps, false);
 
     return this.getSingleSidedDepositIxs(
       strategyWithAddress,
@@ -1767,12 +1767,12 @@ export class Kamino {
     let swapper: SwapperIxBuilder = swapIxsBuilder
       ? swapIxsBuilder
       : (
-        input: DepositAmountsForSwap,
-        tokenAMint: PublicKey,
-        tokenBMint: PublicKey,
-        user: PublicKey,
-        slippageBps: Decimal
-      ) => this.getJupSwapIxs(input, tokenAMint, tokenBMint, user, slippageBps, false);
+          input: DepositAmountsForSwap,
+          tokenAMint: PublicKey,
+          tokenBMint: PublicKey,
+          user: PublicKey,
+          slippageBps: Decimal
+        ) => this.getJupSwapIxs(input, tokenAMint, tokenBMint, user, slippageBps, false);
 
     return this.getSingleSidedDepositIxs(
       strategyWithAddress,
@@ -3447,10 +3447,10 @@ export class Kamino {
     priceUpper: Decimal,
     payer: PublicKey
   ) => [
-      await this.executiveWithdraw(strategy, new Rebalance()),
-      await this.collectFeesAndRewards(strategy),
-      await this.openPosition(strategy, newPosition, priceLower, priceUpper, new Rebalancing()),
-    ];
+    await this.executiveWithdraw(strategy, new Rebalance()),
+    await this.collectFeesAndRewards(strategy),
+    await this.openPosition(strategy, newPosition, priceLower, priceUpper, new Rebalancing()),
+  ];
 
   /**
    * Get a list of rebalancing params
@@ -4433,7 +4433,9 @@ export class Kamino {
     return nativeFeesAndRewards ? { ...nativeFeesAndRewards, kRewardAmounts: [] } : nativeFeesAndRewards;
   }
 
-  private async getNativePendingFeesAndRewards(strategy: WhirlpoolStrategy): Promise<NativePendingFeesAndRewards | null> {
+  private async getNativePendingFeesAndRewards(
+    strategy: WhirlpoolStrategy
+  ): Promise<NativePendingFeesAndRewards | null> {
     const { strategyDex, position } = strategy;
     const dexNo = strategyDex.toNumber();
 
@@ -4455,7 +4457,7 @@ export class Kamino {
    */
   async getPendingFeesAndRewardsByOwner(
     strategy: WhirlpoolStrategy,
-    owner: PublicKey,
+    owner: PublicKey
   ): Promise<PendingFeesAndRewards | null> {
     const allFeesAndRewards = await this.getPendingFeesAndRewards(strategy);
     if (allFeesAndRewards == null) {
@@ -4465,19 +4467,20 @@ export class Kamino {
     const ownerSharesAta = await getAssociatedTokenAddress(strategy.sharesMint, owner);
     const ownerShares = await this.getTokenAccountBalance(ownerSharesAta);
     if (ownerShares.isZero()) {
-      throw new Error("Owner balance should be more than zero");
+      throw new Error('Owner balance should be more than zero');
     }
 
-    const sharesMintDecimals = new Decimal(strategy.sharesMintDecimals.toString())
-    const totalShares = new Decimal(strategy.sharesIssued.toString())
-      .dividedBy(new Decimal(10).pow(sharesMintDecimals));
+    const sharesMintDecimals = new Decimal(strategy.sharesMintDecimals.toString());
+    const totalShares = new Decimal(strategy.sharesIssued.toString()).dividedBy(
+      new Decimal(10).pow(sharesMintDecimals)
+    );
     const shareRatio = ownerShares.dividedBy(totalShares);
 
     return {
       tokenFeeAmountA: allFeesAndRewards.tokenFeeAmountA.mul(shareRatio).round(),
       tokenFeeAmountB: allFeesAndRewards.tokenFeeAmountB.mul(shareRatio).round(),
-      rewardAmounts: allFeesAndRewards.rewardAmounts.map(r => r.mul(shareRatio).round()),
-      kRewardAmounts: allFeesAndRewards.kRewardAmounts.map(r => r.mul(shareRatio).round()),
+      rewardAmounts: allFeesAndRewards.rewardAmounts.map((r) => r.mul(shareRatio).round()),
+      kRewardAmounts: allFeesAndRewards.kRewardAmounts.map((r) => r.mul(shareRatio).round()),
     };
   }
 }

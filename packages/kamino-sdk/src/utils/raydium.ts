@@ -12,25 +12,17 @@ export function priceToTickIndexWithRounding(price: number): number {
   return tickIndex;
 }
 
-// Original code: 
+// Original code:
 // https://github.com/raydium-io/raydium-sdk/blob/077049adec6d8fdda12fb74162504b27af7ff92e/src/ammV3/utils/position.ts#L55
-function getFeesGrowthInside(
-  poolState: PoolState,
-  tickLowerState: TickState,
-  tickUpperState: TickState
-) {
+function getFeesGrowthInside(poolState: PoolState, tickLowerState: TickState, tickUpperState: TickState) {
   let feeGrowthBelow0X64 = new BN(0);
   let feeGrowthBelow1X64 = new BN(0);
   if (poolState.tickCurrent >= tickLowerState.tick) {
     feeGrowthBelow0X64 = tickLowerState.feeGrowthOutside0X64;
     feeGrowthBelow1X64 = tickLowerState.feeGrowthOutside1X64;
   } else {
-    feeGrowthBelow0X64 = poolState.feeGrowthGlobal0X64.sub(
-      tickLowerState.feeGrowthOutside0X64
-    );
-    feeGrowthBelow1X64 = poolState.feeGrowthGlobal1X64.sub(
-      tickLowerState.feeGrowthOutside1X64
-    );
+    feeGrowthBelow0X64 = poolState.feeGrowthGlobal0X64.sub(tickLowerState.feeGrowthOutside0X64);
+    feeGrowthBelow1X64 = poolState.feeGrowthGlobal1X64.sub(tickLowerState.feeGrowthOutside1X64);
   }
 
   let feeGrowthAbove0X64 = new BN(0);
@@ -39,12 +31,8 @@ function getFeesGrowthInside(
     feeGrowthAbove0X64 = tickUpperState.feeGrowthOutside0X64;
     feeGrowthAbove1X64 = tickUpperState.feeGrowthOutside1X64;
   } else {
-    feeGrowthAbove0X64 = poolState.feeGrowthGlobal0X64.sub(
-      tickUpperState.feeGrowthOutside0X64
-    );
-    feeGrowthAbove1X64 = poolState.feeGrowthGlobal1X64.sub(
-      tickUpperState.feeGrowthOutside1X64
-    );
+    feeGrowthAbove0X64 = poolState.feeGrowthGlobal0X64.sub(tickUpperState.feeGrowthOutside0X64);
+    feeGrowthAbove1X64 = poolState.feeGrowthGlobal1X64.sub(tickUpperState.feeGrowthOutside1X64);
   }
 
   const feeGrowthInside0X64 = MathUtil.wrappingSubU128(
@@ -59,7 +47,7 @@ function getFeesGrowthInside(
   return { feeGrowthInside0X64, feeGrowthInside1X64 };
 }
 
-// Original code: 
+// Original code:
 // https://github.com/raydium-io/raydium-sdk/blob/077049adec6d8fdda12fb74162504b27af7ff92e/src/ammV3/utils/position.ts#L55
 export function getPositionFees(
   poolState: PoolState,
@@ -67,27 +55,17 @@ export function getPositionFees(
   tickLowerState: TickState,
   tickUpperState: TickState
 ) {
-  const { feeGrowthInside0X64, feeGrowthInside1X64 } = getFeesGrowthInside(
-    poolState,
-    tickLowerState,
-    tickUpperState
-  );
+  const { feeGrowthInside0X64, feeGrowthInside1X64 } = getFeesGrowthInside(poolState, tickLowerState, tickUpperState);
 
   const feeGrowthDelta0 = MathUtil.mulDivFloor(
-    MathUtil.wrappingSubU128(
-      feeGrowthInside0X64,
-      positionState.feeGrowthInside0LastX64
-    ),
+    MathUtil.wrappingSubU128(feeGrowthInside0X64, positionState.feeGrowthInside0LastX64),
     positionState.liquidity,
     Q64
   );
   const tokenFeeAmount0 = positionState.tokenFeesOwed0.add(feeGrowthDelta0);
 
   const feeGrowthDelta1 = MathUtil.mulDivFloor(
-    MathUtil.wrappingSubU128(
-      feeGrowthInside1X64,
-      positionState.feeGrowthInside1LastX64
-    ),
+    MathUtil.wrappingSubU128(feeGrowthInside1X64, positionState.feeGrowthInside1LastX64),
     positionState.liquidity,
     Q64
   );
@@ -96,13 +74,13 @@ export function getPositionFees(
   return { tokenFeeAmount0, tokenFeeAmount1 };
 }
 
-// Original code: 
+// Original code:
 // https://github.com/raydium-io/raydium-sdk/blob/077049adec6d8fdda12fb74162504b27af7ff92e/src/ammV3/utils/position.ts#L123
 function getRewardGrowthInside(
   tickCurrentIndex: number,
   tickLowerState: TickState,
   tickUpperState: TickState,
-  rewardInfos: RewardInfo[],
+  rewardInfos: RewardInfo[]
 ): BN[] {
   const rewardGrowthsInside: BN[] = [];
   for (let i = 0; i < rewardInfos.length; i++) {
@@ -110,9 +88,7 @@ function getRewardGrowthInside(
     if (tickLowerState.liquidityGross.eqn(0)) {
       rewardGrowthsBelow = rewardInfos[i].rewardGrowthGlobalX64;
     } else if (tickCurrentIndex < tickLowerState.tick) {
-      rewardGrowthsBelow = rewardInfos[i].rewardGrowthGlobalX64.sub(
-        tickLowerState.rewardGrowthsOutsideX64[i]
-      );
+      rewardGrowthsBelow = rewardInfos[i].rewardGrowthGlobalX64.sub(tickLowerState.rewardGrowthsOutsideX64[i]);
     } else {
       rewardGrowthsBelow = tickLowerState.rewardGrowthsOutsideX64[i];
     }
@@ -123,17 +99,12 @@ function getRewardGrowthInside(
     } else if (tickCurrentIndex < tickUpperState.tick) {
       rewardGrowthsAbove = tickUpperState.rewardGrowthsOutsideX64[i];
     } else {
-      rewardGrowthsAbove = rewardInfos[i].rewardGrowthGlobalX64.sub(
-        tickUpperState.rewardGrowthsOutsideX64[i]
-      );
+      rewardGrowthsAbove = rewardInfos[i].rewardGrowthGlobalX64.sub(tickUpperState.rewardGrowthsOutsideX64[i]);
     }
 
     rewardGrowthsInside.push(
       MathUtil.wrappingSubU128(
-        MathUtil.wrappingSubU128(
-          rewardInfos[i].rewardGrowthGlobalX64,
-          rewardGrowthsBelow
-        ),
+        MathUtil.wrappingSubU128(rewardInfos[i].rewardGrowthGlobalX64, rewardGrowthsBelow),
         rewardGrowthsAbove
       )
     );
@@ -142,7 +113,7 @@ function getRewardGrowthInside(
   return rewardGrowthsInside;
 }
 
-// Original code: 
+// Original code:
 // https://github.com/raydium-io/raydium-sdk/blob/077049adec6d8fdda12fb74162504b27af7ff92e/src/ammV3/utils/position.ts#L90
 export function getPositionRewards(
   poolState: PoolState,
@@ -162,15 +133,8 @@ export function getPositionRewards(
     const rewardGrowthInside = rewardGrowthsInside[i];
     const currRewardInfo = positionState.rewardInfos[i];
 
-    const rewardGrowthDelta = MathUtil.wrappingSubU128(
-      rewardGrowthInside,
-      currRewardInfo.growthInsideLastX64
-    );
-    const amountOwedDelta = MathUtil.mulDivFloor(
-      rewardGrowthDelta,
-      positionState.liquidity,
-      Q64
-    );
+    const rewardGrowthDelta = MathUtil.wrappingSubU128(rewardGrowthInside, currRewardInfo.growthInsideLastX64);
+    const amountOwedDelta = MathUtil.mulDivFloor(rewardGrowthDelta, positionState.liquidity, Q64);
     const rewardAmountOwed = currRewardInfo.rewardAmountOwed.add(amountOwedDelta);
     rewards.push(rewardAmountOwed);
   }

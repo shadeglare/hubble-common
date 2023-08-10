@@ -228,9 +228,14 @@ export interface PositionRange {
   upperPrice: Decimal;
 }
 
-export interface TokensBalances {
+export interface MaybeTokensBalances {
   a?: Decimal;
   b?: Decimal;
+}
+
+export interface TokensBalances {
+  a: Decimal;
+  b: Decimal;
 }
 
 export interface SwapperIxBuilder {
@@ -239,8 +244,17 @@ export interface SwapperIxBuilder {
     tokenAMint: PublicKey,
     tokenBMint: PublicKey,
     owner: PublicKey,
-    slippage: Decimal
+    slippage: Decimal,
+    allKeys: PublicKey[]
   ): Promise<[TransactionInstruction[], PublicKey[]]>;
+}
+
+export interface ProfiledFunctionExecution {
+  (promise: Promise<any>, transactionName: string, tags: [string, string][]): Promise<any>;
+}
+
+export function noopProfiledFunctionExecution(promise: Promise<any>, transactionName: string): Promise<any> {
+  return promise;
 }
 
 export interface CreateAta {

@@ -98,8 +98,9 @@ import {
   lamportsToNumberDecimal,
   DECIMALS_SOL,
   InstructionsWithLookupTables,
-  PendingFeesAndRewards,
-  NativePendingFeesAndRewards,
+  ProfiledFunctionExecution,
+  noopProfiledFunctionExecution,
+  MaybeTokensBalances,
 } from './utils';
 import { ASSOCIATED_TOKEN_PROGRAM_ID, Token, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import {
@@ -181,7 +182,7 @@ import {
   DefaultPerformanceFeeBps,
   DefaultWithdrawFeeBps,
 } from './constants/DefaultStrategyConfig';
-import { DEVNET_GLOBAL_LOOKUP_TABLE, MAINNET_GLOBAL_LOOKUP_TABLE } from './constants/pubkeys';
+import { DEVNET_GLOBAL_LOOKUP_TABLE, MAINNET_GLOBAL_LOOKUP_TABLE, MAINNET_TOKEN_INFOS } from './constants/pubkeys';
 import {
   DefaultDex,
   DefaultFeeTierOrca,
@@ -211,9 +212,11 @@ import {
   createWsolAtaIfMissing,
   decodeSerializedTransaction,
   getAtasWithCreateIxnsIfMissing,
+  MAX_ACCOUNTS_PER_TRANSACTION,
   removeBudgetAndAtaIxns,
 } from './utils/transactions';
 import { RouteInfo } from '@jup-ag/core';
+import { QuoteResponse, SwapResponse } from '@jup-ag/api';
 export const KAMINO_IDL = KaminoIdl;
 
 export class Kamino {
@@ -263,13 +266,12 @@ export class Kamino {
       setWhirlpoolsProgramId(whirlpoolProgramId);
     }
 
-    // if (raydiumProgramId) {
-    //   setRaydiumProgramId(raydiumProgramId);
-    // } else {
-    //   if (cluster == 'devnet') {
-    //     setRaydiumProgramId(RAYDIUM_DEVNET_PROGRAM_ID);
-    //   }
-    // }
+    if (cluster === 'localnet') {
+      if (raydiumProgramId) {
+        setRaydiumProgramId(raydiumProgramId);
+      }
+    }
+
     this._orcaService = new OrcaService(connection, cluster, this._globalConfig);
     this._raydiumService = new RaydiumService(connection, cluster);
     this._jupService = new JupService(connection, cluster);
@@ -1016,23 +1018,26 @@ export class Kamino {
   };
 
   private getStrategyTokensBalances = async (strategy: WhirlpoolStrategy): Promise<TokenHoldings> => {
-    const collateralInfos = await this.getCollateralInfos();
     if (strategy.strategyDex.toNumber() == dexToNumber('ORCA')) {
-      const whirlpool = await Whirlpool.fetch(this._connection, strategy.pool);
+      const [whirlpool, position] = await Promise.all([
+        Whirlpool.fetch(this._connection, strategy.pool),
+        Position.fetch(this._connection, strategy.position),
+      ]);
       if (!whirlpool) {
         throw Error(`Could not fetch whirlpool state with pubkey ${strategy.pool.toString()}`);
       }
-      const position = await Position.fetch(this._connection, strategy.position);
       if (!position) {
         throw Error(`Could not fetch position state with pubkey ${strategy.position.toString()}`);
       }
       return this.getOrcaTokensBalances(strategy, whirlpool, position);
     } else if (strategy.strategyDex.toNumber() == dexToNumber('RAYDIUM')) {
-      const poolState = await PoolState.fetch(this._connection, strategy.pool);
+      const [poolState, position] = await Promise.all([
+        PoolState.fetch(this._connection, strategy.pool),
+        PersonalPositionState.fetch(this._connection, strategy.position),
+      ]);
       if (!poolState) {
         throw Error(`Could not fetch Raydium pool state with pubkey ${strategy.pool.toString()}`);
       }
-      const position = await PersonalPositionState.fetch(this._connection, strategy.position);
       if (!position) {
         throw Error(`Could not fetch position state with pubkey ${strategy.position.toString()}`);
       }
@@ -1671,40 +1676,48 @@ export class Kamino {
     strategy: PublicKey | StrategyWithAddress,
     amountToDeposit: Decimal,
     owner: PublicKey,
-    slippage: Decimal,
+    slippageBps: Decimal,
+    profiler: ProfiledFunctionExecution = noopProfiledFunctionExecution,
     swapIxsBuilder?: SwapperIxBuilder,
-    initialUserTokenBalances?: TokensBalances,
+    initialUserTokenAtaBalances?: TokensBalances,
     priceAInB?: Decimal
   ): Promise<InstructionsWithLookupTables> => {
     const strategyWithAddress = await this.getStrategyStateIfNotFetched(strategy);
 
-    let userTokenBalances = await this.getInitialUserTokenBalances(
-      owner,
-      strategyWithAddress.strategy.tokenAMint,
-      strategyWithAddress.strategy.tokenBMint,
-      initialUserTokenBalances
+    let userTokenBalances = await profiler(
+      this.getInitialUserTokenBalances(
+        owner,
+        strategyWithAddress.strategy.tokenAMint,
+        strategyWithAddress.strategy.tokenBMint,
+        initialUserTokenAtaBalances
+      ),
+      'A-getInitialUserTokenBalances',
+      []
     );
+
+    const userTokenBalancesWithoutSolBalanace = {
+      a: userTokenBalances.a,
+      b: userTokenBalances.b,
+    };
 
     // if any of the tokens is SOL, we need to read how much SOL the user has, not how much wSOL which is what getInitialUserTokenBalances returns
     if (isSOLMint(strategyWithAddress.strategy.tokenAMint)) {
-      userTokenBalances.a = lamportsToNumberDecimal(
-        new Decimal(await this._connection.getBalance(owner)),
-        DECIMALS_SOL
+      userTokenBalances.a = userTokenBalances.a?.add(
+        lamportsToNumberDecimal(new Decimal(await this._connection.getBalance(owner)), DECIMALS_SOL)
       );
     }
 
     if (isSOLMint(strategyWithAddress.strategy.tokenBMint)) {
-      userTokenBalances.b = lamportsToNumberDecimal(
-        new Decimal(await this._connection.getBalance(owner)),
-        DECIMALS_SOL
+      userTokenBalances.b = userTokenBalances.b?.add(
+        lamportsToNumberDecimal(new Decimal(await this._connection.getBalance(owner)), DECIMALS_SOL)
       );
     }
 
     if (!userTokenBalances.a || !userTokenBalances.b) {
       throw Error('Error reading user token balances');
     }
-    let tokenAMinPostDepositBalance = userTokenBalances.a.sub(amountToDeposit);
 
+    let tokenAMinPostDepositBalance = userTokenBalances.a?.sub(amountToDeposit);
     let swapper: SwapperIxBuilder = swapIxsBuilder
       ? swapIxsBuilder
       : (
@@ -1712,17 +1725,24 @@ export class Kamino {
           tokenAMint: PublicKey,
           tokenBMint: PublicKey,
           user: PublicKey,
-          slippageBps: Decimal
-        ) => this.getJupSwapIxs(input, tokenAMint, tokenBMint, user, slippageBps, false);
+          slippageBps: Decimal,
+          allAccounts: PublicKey[]
+        ) => this.getJupSwapIxsV6(input, tokenAMint, tokenBMint, user, slippageBps, false, allAccounts, profiler);
 
-    return this.getSingleSidedDepositIxs(
-      strategyWithAddress,
-      collToLamportsDecimal(tokenAMinPostDepositBalance, strategyWithAddress.strategy.tokenAMintDecimals.toNumber()),
-      collToLamportsDecimal(userTokenBalances.b, strategyWithAddress.strategy.tokenBMintDecimals.toNumber()),
-      owner,
-      slippage,
-      swapper,
-      priceAInB
+    return await profiler(
+      this.getSingleSidedDepositIxs(
+        strategyWithAddress,
+        collToLamportsDecimal(tokenAMinPostDepositBalance, strategyWithAddress.strategy.tokenAMintDecimals.toNumber()),
+        collToLamportsDecimal(userTokenBalances.b, strategyWithAddress.strategy.tokenBMintDecimals.toNumber()),
+        owner,
+        slippageBps,
+        swapper,
+        profiler,
+        userTokenBalancesWithoutSolBalanace,
+        priceAInB
+      ),
+      'A-getSingleSidedDepositIxs',
+      []
     );
   };
 
@@ -1730,32 +1750,40 @@ export class Kamino {
     strategy: PublicKey | StrategyWithAddress,
     amountToDeposit: Decimal,
     owner: PublicKey,
-    slippage: Decimal,
+    slippageBps: Decimal,
+    profiler: ProfiledFunctionExecution = noopProfiledFunctionExecution,
     swapIxsBuilder?: SwapperIxBuilder,
-    initialUserTokenBalances?: TokensBalances,
+    initialUserTokenAtaBalances?: TokensBalances,
     priceAInB?: Decimal
   ): Promise<InstructionsWithLookupTables> => {
     const strategyWithAddress = await this.getStrategyStateIfNotFetched(strategy);
 
-    let userTokenBalances = await this.getInitialUserTokenBalances(
-      owner,
-      strategyWithAddress.strategy.tokenAMint,
-      strategyWithAddress.strategy.tokenBMint,
-      initialUserTokenBalances
+    let userTokenBalances = await profiler(
+      this.getInitialUserTokenBalances(
+        owner,
+        strategyWithAddress.strategy.tokenAMint,
+        strategyWithAddress.strategy.tokenBMint,
+        initialUserTokenAtaBalances
+      ),
+      'A-getInitialUserTokenBalances',
+      []
     );
+
+    const userTokenBalancesWithoutSolBalanace = {
+      a: userTokenBalances.a,
+      b: userTokenBalances.b,
+    };
 
     // if any of the tokens is SOL, we need to read how much SOL the user has, not how much wSOL which is what getInitialUserTokenBalances returns
     if (isSOLMint(strategyWithAddress.strategy.tokenAMint)) {
-      userTokenBalances.a = lamportsToNumberDecimal(
-        new Decimal(await this._connection.getBalance(owner)),
-        DECIMALS_SOL
+      userTokenBalances.a = userTokenBalances.a?.add(
+        lamportsToNumberDecimal(new Decimal(await this._connection.getBalance(owner)), DECIMALS_SOL)
       );
     }
 
     if (isSOLMint(strategyWithAddress.strategy.tokenBMint)) {
-      userTokenBalances.b = lamportsToNumberDecimal(
-        new Decimal(await this._connection.getBalance(owner)),
-        DECIMALS_SOL
+      userTokenBalances.b = userTokenBalances.b?.add(
+        lamportsToNumberDecimal(new Decimal(await this._connection.getBalance(owner)), DECIMALS_SOL)
       );
     }
 
@@ -1763,7 +1791,6 @@ export class Kamino {
       throw Error('Error reading user token balances');
     }
     let tokenBMinPostDepositBalance = userTokenBalances.b.sub(amountToDeposit);
-
     let swapper: SwapperIxBuilder = swapIxsBuilder
       ? swapIxsBuilder
       : (
@@ -1771,25 +1798,32 @@ export class Kamino {
           tokenAMint: PublicKey,
           tokenBMint: PublicKey,
           user: PublicKey,
-          slippageBps: Decimal
-        ) => this.getJupSwapIxs(input, tokenAMint, tokenBMint, user, slippageBps, false);
+          slippageBps: Decimal,
+          allAccounts: PublicKey[]
+        ) => this.getJupSwapIxsV6(input, tokenAMint, tokenBMint, user, slippageBps, false, allAccounts, profiler);
 
-    return this.getSingleSidedDepositIxs(
-      strategyWithAddress,
-      collToLamportsDecimal(userTokenBalances.a, strategyWithAddress.strategy.tokenAMintDecimals.toNumber()),
-      collToLamportsDecimal(tokenBMinPostDepositBalance, strategyWithAddress.strategy.tokenBMintDecimals.toNumber()),
-      owner,
-      slippage,
-      swapper,
-      priceAInB
+    return await profiler(
+      this.getSingleSidedDepositIxs(
+        strategyWithAddress,
+        collToLamportsDecimal(userTokenBalances.a, strategyWithAddress.strategy.tokenAMintDecimals.toNumber()),
+        collToLamportsDecimal(tokenBMinPostDepositBalance, strategyWithAddress.strategy.tokenBMintDecimals.toNumber()),
+        owner,
+        slippageBps,
+        swapper,
+        profiler,
+        userTokenBalancesWithoutSolBalanace,
+        priceAInB
+      ),
+      'A-getSingleSidedDepositIxs',
+      []
     );
   };
 
-  private getInitialUserTokenBalances = async (
+  getInitialUserTokenBalances = async (
     owner: PublicKey,
     tokenAMint: PublicKey,
     tokenBMint: PublicKey,
-    initialUserTokenBalances?: TokensBalances
+    initialUserTokenBalances?: MaybeTokensBalances
   ): Promise<TokensBalances> => {
     let initialUserTokenABalance = new Decimal(0);
     let initialUserTokenBBalance = new Decimal(0);
@@ -1828,8 +1862,10 @@ export class Kamino {
     tokenAMinPostDepositBalanceLamports: Decimal,
     tokenBMinPostDepositBalanceLamports: Decimal,
     owner: PublicKey,
-    swapSlippage: Decimal,
+    swapSlippageBps: Decimal,
     swapIxsBuilder: SwapperIxBuilder,
+    profiler: ProfiledFunctionExecution,
+    initialUserTokenAtaBalances: TokensBalances,
     priceAInB?: Decimal // not mandatory as it will be fetched from Jupyter
   ): Promise<InstructionsWithLookupTables> => {
     const strategyWithAddress = await this.getStrategyStateIfNotFetched(strategy);
@@ -1844,18 +1880,13 @@ export class Kamino {
       throw Error('Token A or B post deposit amount cant be lower than 0.');
     }
 
-    const sharesAta = await getAssociatedTokenAddress(strategyState.sharesMint, owner);
-    const tokenAAta = await getAssociatedTokenAddress(strategyState.tokenAMint, owner);
-    const tokenBAta = await getAssociatedTokenAddress(strategyState.tokenBMint, owner);
+    const sharesAta = getAssociatedTokenAddress(strategyState.sharesMint, owner);
+    const tokenAAta = getAssociatedTokenAddress(strategyState.tokenAMint, owner);
+    const tokenBAta = getAssociatedTokenAddress(strategyState.tokenBMint, owner);
 
-    const createAtasIxns = await getAtasWithCreateIxnsIfMissing(
-      this._connection,
-      [strategyState.tokenAMint, strategyState.tokenBMint, strategyState.sharesMint].filter((mint) => !isSOLMint(mint)),
-      owner
-    );
+    let tokenAAtaBalance = initialUserTokenAtaBalances.a;
+    let tokenBAtaBalance = initialUserTokenAtaBalances.b;
 
-    let tokenAAtaBalance = await this.getTokenAccountBalanceOrZero(tokenAAta);
-    let tokenBAtaBalance = await this.getTokenAccountBalanceOrZero(tokenBAta);
     let aToDeposit = collToLamportsDecimal(tokenAAtaBalance, strategyState.tokenAMintDecimals.toNumber()).sub(
       tokenAMinPostDepositBalanceLamports
     );
@@ -1864,18 +1895,28 @@ export class Kamino {
     );
 
     let cleanupIxs: TransactionInstruction[] = [];
+    let createWsolAtasIxns: TransactionInstruction[] = [];
 
     if (isSOLMint(strategyState.tokenAMint)) {
       // read how much SOL the user has and calculate the amount to deposit and balance based on it
-      let availableSol = new Decimal(await this._connection.getBalance(owner));
-      let solToDepsit = availableSol.sub(tokenAMinPostDepositBalanceLamports);
+      let solBalance = new Decimal(await this._connection.getBalance(owner));
+      let tokenAAtaBalanceLamports = collToLamportsDecimal(
+        tokenAAtaBalance,
+        strategyState.tokenAMintDecimals.toNumber()
+      );
+      let availableSol = solBalance.add(tokenAAtaBalanceLamports);
+      let solToDeposit = availableSol.sub(tokenAMinPostDepositBalanceLamports);
 
-      aToDeposit = solToDepsit;
-      tokenAAtaBalance = lamportsToNumberDecimal(solToDepsit, DECIMALS_SOL);
+      aToDeposit = solToDeposit;
+      if (!aToDeposit.eq(ZERO)) {
+        if (tokenAAtaBalanceLamports.lessThan(aToDeposit)) {
+          tokenAAtaBalance = lamportsToNumberDecimal(aToDeposit, DECIMALS_SOL);
+        }
+      }
 
       let createWSolAtaIxns = await createWsolAtaIfMissing(
         this._connection,
-        new Decimal(lamportsToNumberDecimal(solToDepsit, DECIMALS_SOL)),
+        new Decimal(lamportsToNumberDecimal(solToDeposit, DECIMALS_SOL)),
         owner
       );
 
@@ -1883,38 +1924,62 @@ export class Kamino {
       let wSolAtaExists = await checkIfAccountExists(this._connection, createWSolAtaIxns.ata);
       if (!wSolAtaExists) {
         realTokenAMinPostDepositBalanceLamports = new Decimal(0);
+      } else {
+        if (solToDeposit.greaterThanOrEqualTo(tokenAAtaBalanceLamports)) {
+          realTokenAMinPostDepositBalanceLamports = ZERO;
+        } else {
+          realTokenAMinPostDepositBalanceLamports = tokenAAtaBalanceLamports.sub(solToDeposit);
+        }
       }
 
-      createAtasIxns.push(...createWSolAtaIxns.createIxns);
+      createWsolAtasIxns.push(...createWSolAtaIxns.createIxns);
       cleanupIxs.push(...createWSolAtaIxns.closeIxns);
     }
 
     if (isSOLMint(strategyState.tokenBMint)) {
-      let availableSol = new Decimal(await this._connection.getBalance(owner));
-      let solToDepsit = availableSol.sub(tokenBMinPostDepositBalanceLamports);
+      let solBalance = new Decimal(await this._connection.getBalance(owner));
+      let tokenBAtaBalanceLamports = collToLamportsDecimal(
+        tokenBAtaBalance,
+        strategyState.tokenBMintDecimals.toNumber()
+      );
+      let availableSol = solBalance.add(tokenBAtaBalanceLamports);
+      let solToDeposit = availableSol.sub(tokenBMinPostDepositBalanceLamports);
+      availableSol;
 
-      bToDeposit = solToDepsit;
-      tokenBAtaBalance = lamportsToNumberDecimal(solToDepsit, DECIMALS_SOL);
+      bToDeposit = solToDeposit;
+
+      if (!tokenBAtaBalance.eq(ZERO)) {
+        tokenBAtaBalance = lamportsToNumberDecimal(bToDeposit, DECIMALS_SOL);
+      }
 
       let createWSolAtaIxns = await createWsolAtaIfMissing(
         this._connection,
-        new Decimal(lamportsToNumberDecimal(solToDepsit, DECIMALS_SOL)),
+        new Decimal(lamportsToNumberDecimal(solToDeposit, DECIMALS_SOL)),
         owner
       );
 
       let wSolAtaExists = await checkIfAccountExists(this._connection, createWSolAtaIxns.ata);
       if (!wSolAtaExists) {
         realTokenBMinPostDepositBalanceLamports = new Decimal(0);
+      } else {
+        if (solToDeposit.greaterThanOrEqualTo(tokenBAtaBalanceLamports)) {
+          realTokenBMinPostDepositBalanceLamports = ZERO;
+        } else {
+          realTokenBMinPostDepositBalanceLamports = tokenBAtaBalanceLamports.sub(solToDeposit);
+        }
       }
 
-      createAtasIxns.push(...createWSolAtaIxns.createIxns);
+      createWsolAtasIxns.push(...createWSolAtaIxns.createIxns);
       cleanupIxs.push(...createWSolAtaIxns.closeIxns);
     }
 
-    let checkExpectedVaultsBalancesIx = await this.getCheckExpectedVaultsBalancesIx(strategyWithAddress, owner, {
-      a: tokenAAtaBalance,
-      b: tokenBAtaBalance,
-    });
+    let amountsToDepositWithSwapPromise = this.calculateAmountsToBeDepositedWithSwap(
+      strategyWithAddress,
+      aToDeposit,
+      bToDeposit,
+      profiler,
+      priceAInB
+    );
 
     if (aToDeposit.lessThan(0) || bToDeposit.lessThan(0)) {
       throw Error(
@@ -1922,26 +1987,38 @@ export class Kamino {
       );
     }
 
-    let amountsToDepositWithSwap = await this.calculateAmountsToBeDepositedWithSwap(
-      strategyWithAddress,
-      aToDeposit,
-      bToDeposit,
-      priceAInB
+    const createAtaList = [strategyState.sharesMint];
+    if (!tokenAAtaBalance.greaterThan(0)) {
+      createAtaList.push(strategyState.tokenAMint);
+    }
+
+    if (!tokenBAtaBalance.greaterThan(0)) {
+      createAtaList.push(strategyState.tokenBMint);
+    }
+
+    const createAtasIxnsPromise = getAtasWithCreateIxnsIfMissing(
+      this._connection,
+      createAtaList.filter((mint) => !isSOLMint(mint)),
+      owner
     );
 
-    let [jupSwapIxs, lookupTablesAddresses] = await swapIxsBuilder(
-      amountsToDepositWithSwap,
-      strategyState.tokenAMint,
-      strategyState.tokenBMint,
-      owner,
-      swapSlippage
+    const getGlobalConfigPromise = GlobalConfig.fetch(this._connection, strategyState.globalConfig);
+    const [createAtasIxns, amountsToDepositWithSwap, globalConfig] = await profiler(
+      Promise.all([createAtasIxnsPromise, amountsToDepositWithSwapPromise, getGlobalConfigPromise]),
+      'B-promiseAll(createAtasIxns, amountsToDepositWithSwap)',
+      []
+    );
+
+    let checkExpectedVaultsBalancesIx = await profiler(
+      this.getCheckExpectedVaultsBalancesIx(strategyWithAddress, owner, tokenAAta, tokenBAta, {
+        a: tokenAAtaBalance,
+        b: tokenBAtaBalance,
+      }),
+      'B-getCheckExpectedVaultsBalancesIx',
+      []
     );
 
     let poolProgram = getDexProgramId(strategyState);
-    const globalConfig = await GlobalConfig.fetch(this._connection, strategyState.globalConfig);
-    if (!globalConfig) {
-      throw Error(`Could not fetch global config with pubkey ${strategyState.globalConfig.toString()}`);
-    }
 
     const { treasuryFeeTokenAVault, treasuryFeeTokenBVault } = this.getTreasuryFeeVaultPDAs(
       strategyState.tokenAMint,
@@ -1989,93 +2066,265 @@ export class Kamino {
     let singleSidedDepositIx = singleTokenDepositAndInvestWithMin(args, accounts);
 
     let result: TransactionInstruction[] = [];
-    result.push(...createAtasIxns);
+    result.push(...createAtasIxns, ...createWsolAtasIxns);
+
+    // get all unique accounts in the tx so we can use the remaining space (MAX_ACCOUNTS_PER_TRANSACTION - accounts_used) for the swap
+    const extractKeys = (ixs: any[]) => ixs.flatMap((ix) => ix.keys?.map((key) => key.pubkey) || []);
+
+    const allKeys = [
+      ...extractKeys(result),
+      ...extractKeys([checkExpectedVaultsBalancesIx]),
+      ...extractKeys([singleSidedDepositIx]),
+      ...extractKeys(cleanupIxs),
+    ];
+
+    let [jupSwapIxs, lookupTablesAddresses] = await profiler(
+      Kamino.retryAsync(async () =>
+        profiler(
+          swapIxsBuilder(
+            amountsToDepositWithSwap,
+            strategyState.tokenAMint,
+            strategyState.tokenBMint,
+            owner,
+            swapSlippageBps,
+            allKeys
+          ),
+          'B-swapIxsBuilder',
+          [
+            ['tokenAMint', strategyState.tokenAMint.toString()],
+            ['tokenBMint', strategyState.tokenBMint.toString()],
+          ]
+        )
+      ),
+      'B-retryAsync',
+      []
+    );
 
     result = result.concat([checkExpectedVaultsBalancesIx, ...jupSwapIxs, singleSidedDepositIx, ...cleanupIxs]);
     return { instructions: result, lookupTablesAddresses };
   };
 
-  getJupSwapIxs = async (
+  static async retryAsync(fn: () => Promise<any>, retriesLeft = 5, interval = 2000): Promise<any> {
+    try {
+      return await fn();
+    } catch (error) {
+      if (retriesLeft) {
+        await new Promise((resolve) => setTimeout(resolve, interval));
+        return await Kamino.retryAsync(fn, retriesLeft - 1, interval);
+      }
+      throw error;
+    }
+  }
+
+  getJupSwapIxsWithMaxAccounts = async (
     input: DepositAmountsForSwap,
     tokenAMint: PublicKey,
     tokenBMint: PublicKey,
     owner: PublicKey,
-    slippage: Decimal,
-    useOnlyLegacyTransaction: boolean
+    slippageBps: Decimal,
+    useOnlyLegacyTransaction: boolean,
+    existingAccounts: PublicKey[],
+    maxAccounts: number,
+    profiler: ProfiledFunctionExecution = noopProfiledFunctionExecution
   ): Promise<[TransactionInstruction[], PublicKey[]]> => {
-    let jupiterBestRoute: RouteInfo;
-    if (input.tokenAToSwapAmount.lt(ZERO)) {
-      jupiterBestRoute = await JupService.getBestRoute(
-        input.tokenAToSwapAmount,
-        tokenAMint,
-        tokenBMint,
-        slippage.toNumber(),
-        'ExactIn',
-        useOnlyLegacyTransaction
-      );
-    } else {
-      jupiterBestRoute = await JupService.getBestRoute(
-        input.tokenBToSwapAmount,
-        tokenBMint,
-        tokenAMint,
-        slippage.toNumber(),
-        'ExactIn',
-        useOnlyLegacyTransaction
-      );
-    }
+    let jupiterQuote: SwapResponse = input.tokenAToSwapAmount.lt(ZERO)
+      ? await profiler(
+          JupService.getBestRouteV6(
+            owner,
+            input.tokenAToSwapAmount.abs(),
+            tokenAMint,
+            tokenBMint,
+            slippageBps.toNumber(),
+            useOnlyLegacyTransaction,
+            maxAccounts
+          ),
+          'C-getBestRouteV6',
+          []
+        )
+      : await profiler(
+          JupService.getBestRouteV6(
+            owner,
+            input.tokenBToSwapAmount.abs(),
+            tokenBMint,
+            tokenAMint,
+            slippageBps.toNumber(),
+            useOnlyLegacyTransaction,
+            maxAccounts
+          ),
+          'C-getBestRouteV6',
+          []
+        );
 
-    const {
-      setupTransaction,
-      swapTransaction,
-      cleanupTransaction,
-    }: {
-      setupTransaction: string | undefined;
-      swapTransaction: string;
-      cleanupTransaction: string | undefined;
-    } = await JupService.getSwapTransactions(jupiterBestRoute, owner, false, false);
+    let { txMessage, lookupTablesAddresses } = await profiler(
+      JupService.deserealizeVersionedTransactions(this._connection, [jupiterQuote.swapTransaction]),
+      'C-deserealizeVersionedTransactions',
+      []
+    );
 
-    // remove budget and atas ixns from jup transaction because we manage it ourself
-    const decodedSetupTx = decodeSerializedTransaction(setupTransaction);
-    let clearedSwapSetupIxs: TransactionInstruction[] = [];
-    if (decodedSetupTx) {
-      clearedSwapSetupIxs = removeBudgetAndAtaIxns(decodedSetupTx.instructions, [
-        tokenAMint.toString(),
-        tokenBMint.toString(),
-      ]);
-    }
-
-    // remove budget and atas ixns from jup transaction because we manage it ourself
-    const decodedCleanupTx = decodeSerializedTransaction(cleanupTransaction);
-    let clearedCleanupIxns: TransactionInstruction[] = [];
-    if (decodedCleanupTx) {
-      clearedCleanupIxns = removeBudgetAndAtaIxns(decodedCleanupTx.instructions, [
-        tokenAMint.toString(),
-        tokenBMint.toString(),
-      ]);
-    }
-
-    let { txMessage, lookupTablesAddresses } = await JupService.deserealizeVersionedTransactions(this._connection, [
-      swapTransaction,
-    ]);
-
-    let clearedSwapIxs = [
+    let allJupIxs = [
       ...removeBudgetAndAtaIxns(txMessage[0].instructions, [tokenAMint.toString(), tokenBMint.toString()]),
     ];
 
-    let allJupIxs = [...clearedSwapSetupIxs, ...clearedSwapIxs, ...clearedCleanupIxns];
+    let allJupAccounts = allJupIxs.flatMap((ix) => ix.keys?.map((key) => key.pubkey) || []);
+    let allAccounts = new Set<PublicKey>([...existingAccounts, ...allJupAccounts]);
 
-    return [allJupIxs, lookupTablesAddresses];
+    let prefix = 'getSingleSidedJupRoute:';
+    console.log(`${prefix} All distinct existing accounts number ${new Set<PublicKey>(existingAccounts).size}`);
+    console.log(`${prefix} All distinct Jup accounts number ${new Set<PublicKey>(allJupAccounts).size}`);
+    console.log(`${prefix} All accounts number ${allAccounts.size}`);
+
+    if (allAccounts.size < MAX_ACCOUNTS_PER_TRANSACTION) {
+      return [allJupIxs, lookupTablesAddresses];
+    }
+
+    // if none of the swap TXs returned by Jup have less than max allowed accounts throw error as the tx will fail because we lock too many accounts
+    throw new Error('All Jupiter swap routes have too many accounts in the instructions');
+  };
+
+  getJupSwapIxsV4 = async (
+    input: DepositAmountsForSwap,
+    tokenAMint: PublicKey,
+    tokenBMint: PublicKey,
+    owner: PublicKey,
+    slippageBps: Decimal,
+    useOnlyLegacyTransaction: boolean,
+    existingAccounts: PublicKey[],
+    profiler: ProfiledFunctionExecution = noopProfiledFunctionExecution
+  ): Promise<[TransactionInstruction[], PublicKey[]]> => {
+    console.log('getJupSwapIxsV4', JSON.stringify(input));
+    let jupiterRoutesPromises: Promise<RouteInfo[]> = input.tokenAToSwapAmount.lt(ZERO)
+      ? JupService.getAllRoutesV4(
+          input.tokenAToSwapAmount.abs(),
+          tokenAMint,
+          tokenBMint,
+          slippageBps.toNumber(),
+          'ExactIn',
+          useOnlyLegacyTransaction
+        )
+      : JupService.getAllRoutesV4(
+          input.tokenBToSwapAmount.abs(),
+          tokenBMint,
+          tokenAMint,
+          slippageBps.toNumber(),
+          'ExactIn',
+          useOnlyLegacyTransaction
+        );
+
+    const jupiterRoutes = await profiler(jupiterRoutesPromises, 'getAllRoutesV4', []);
+
+    for (let route of jupiterRoutes) {
+      const {
+        setupTransaction,
+        swapTransaction,
+        cleanupTransaction,
+      }: {
+        setupTransaction: string | undefined;
+        swapTransaction: string;
+        cleanupTransaction: string | undefined;
+      } = await JupService.getSwapTransactions(route, owner, false, false);
+
+      // remove budget and atas ixns from jup transaction because we manage it ourself
+      const decodedSetupTx = decodeSerializedTransaction(setupTransaction);
+      let clearedSwapSetupIxs: TransactionInstruction[] = [];
+      if (decodedSetupTx) {
+        clearedSwapSetupIxs = removeBudgetAndAtaIxns(decodedSetupTx.instructions, [
+          tokenAMint.toString(),
+          tokenBMint.toString(),
+        ]);
+      }
+
+      // remove budget and atas ixns from jup transaction because we manage it ourself
+      const decodedCleanupTx = decodeSerializedTransaction(cleanupTransaction);
+      let clearedCleanupIxns: TransactionInstruction[] = [];
+      if (decodedCleanupTx) {
+        clearedCleanupIxns = removeBudgetAndAtaIxns(decodedCleanupTx.instructions, [
+          tokenAMint.toString(),
+          tokenBMint.toString(),
+        ]);
+      }
+
+      let { txMessage, lookupTablesAddresses } = await JupService.deserealizeVersionedTransactions(this._connection, [
+        swapTransaction,
+      ]);
+
+      let clearedSwapIxs = [
+        ...removeBudgetAndAtaIxns(txMessage[0].instructions, [tokenAMint.toString(), tokenBMint.toString()]),
+      ];
+
+      let allJupIxs = [...clearedSwapSetupIxs, ...clearedSwapIxs, ...clearedCleanupIxns];
+      let allJupAccounts = allJupIxs.flatMap((ix) => ix.keys?.map((key) => key.pubkey) || []);
+      let allAccounts = new Set<PublicKey>([...existingAccounts, ...allJupAccounts]);
+
+      let prefix = 'getSingleSidedJupRoute:';
+      console.log(`${prefix} All distinct existing accounts number ${new Set<PublicKey>(existingAccounts).size}`);
+      console.log(`${prefix} All distinct Jup accounts number ${new Set<PublicKey>(allJupAccounts).size}`);
+      console.log(`${prefix} All accounts number ${allAccounts.size}`);
+
+      if (allAccounts.size < MAX_ACCOUNTS_PER_TRANSACTION) {
+        return [allJupIxs, lookupTablesAddresses];
+      }
+    }
+
+    // if none of the swap TXs returned by Jup have less than max allowed accounts throw error as the tx will fail because we lock too many accounts
+    throw new Error('All Jupiter swap routes have too many accounts in the instructions');
+  };
+
+  getJupSwapIxsV6 = async (
+    input: DepositAmountsForSwap,
+    tokenAMint: PublicKey,
+    tokenBMint: PublicKey,
+    owner: PublicKey,
+    slippageBps: Decimal,
+    useOnlyLegacyTransaction: boolean,
+    existingAccounts: PublicKey[],
+    profiledFunctionExecution: ProfiledFunctionExecution = noopProfiledFunctionExecution
+  ): Promise<[TransactionInstruction[], PublicKey[]]> => {
+    console.log('getJupSwapIxsV6', JSON.stringify(input));
+
+    let extraAccountsBuffer = 5;
+    const currentAccounts = new Set<PublicKey>(existingAccounts).size;
+    const duplicatedAccounts =
+      1 + // tokenProgram
+      1 + // systemProgram
+      1 + // tokenAMint
+      1 + // tokenBMint
+      1 + // tokenAAta
+      1; // tokenBAta
+
+    while (extraAccountsBuffer < 30) {
+      const maxAccounts = MAX_ACCOUNTS_PER_TRANSACTION - (currentAccounts - duplicatedAccounts) - extraAccountsBuffer;
+      try {
+        const result = await this.getJupSwapIxsWithMaxAccounts(
+          input,
+          tokenAMint,
+          tokenBMint,
+          owner,
+          slippageBps,
+          useOnlyLegacyTransaction,
+          existingAccounts,
+          maxAccounts,
+          profiledFunctionExecution
+        );
+
+        return result;
+      } catch (error) {
+        extraAccountsBuffer += 2;
+        console.log(`getJupSwapIxs: ${error}`);
+      }
+    }
+
+    console.log('getJupSwapIxs: Could not find a route with less than 64 total accounts');
+    throw new Error(`Oops. Failed to find a route. Try again or unselect single-sided deposit.`);
   };
 
   getCheckExpectedVaultsBalancesIx = async (
-    strategy: PublicKey | StrategyWithAddress,
+    strategy: StrategyWithAddress,
     user: PublicKey,
-    expectedTokensBalances?: TokensBalances
+    tokenAAta: PublicKey,
+    tokenBAta: PublicKey,
+    expectedTokensBalances?: MaybeTokensBalances
   ) => {
-    const { strategy: strategyState, address: _ } = await this.getStrategyStateIfNotFetched(strategy);
-
-    const [tokenAAta] = await getAssociatedTokenAddressAndData(this._connection, strategyState.tokenAMint, user);
-    const [tokenBAta] = await getAssociatedTokenAddressAndData(this._connection, strategyState.tokenBMint, user);
+    const { strategy: strategyState, address: _ } = strategy;
 
     let expectedABalance: Decimal;
     if (expectedTokensBalances && expectedTokensBalances.a) {
@@ -2093,6 +2342,7 @@ export class Kamino {
 
     let expectedALamports = collToLamportsDecimal(expectedABalance, strategyState.tokenAMintDecimals.toNumber());
     let expectedBLamports = collToLamportsDecimal(expectedBBalance, strategyState.tokenBMintDecimals.toNumber());
+
     const args: CheckExpectedVaultsBalancesArgs = {
       tokenAAtaBalance: new BN(expectedALamports.toString()),
       tokenBAtaBalance: new BN(expectedBLamports.toString()),
@@ -3648,6 +3898,7 @@ export class Kamino {
     strategy: PublicKey | StrategyWithAddress,
     tokenAAmountUserDeposit: Decimal,
     tokenBAmountUserDeposit: Decimal,
+    profiler: ProfiledFunctionExecution = noopProfiledFunctionExecution,
     priceAInB?: Decimal
   ): Promise<DepositAmountsForSwap> => {
     const { strategy: strategyState } = await this.getStrategyStateIfNotFetched(strategy);
@@ -3663,13 +3914,21 @@ export class Kamino {
     let tokenADecimals = strategyState.tokenAMintDecimals.toNumber();
     let tokenBDecimals = strategyState.tokenBMintDecimals.toNumber();
     let tokenADecimalsDiff = tokenADecimals - tokenBDecimals;
+    const tokenAAddDecimals = tokenADecimalsDiff > 0 ? 0 : Math.abs(tokenADecimalsDiff);
+    const tokenBAddDecimals = tokenADecimalsDiff > 0 ? Math.abs(tokenADecimalsDiff) : 0;
 
     let aAmount = tokenAAmountUserDeposit;
     let bAmount = tokenBAmountUserDeposit;
 
-    let [aAmounts, bAmounts] = await this.calculateAmountsToBeDeposited(
-      strategy,
-      collToLamportsDecimal(new Decimal(100.0), tokenADecimals)
+    let [aAmounts, bAmounts] = await profiler(
+      this.calculateAmountsToBeDeposited(
+        strategy,
+        collToLamportsDecimal(new Decimal(100.0), tokenADecimals),
+        undefined,
+        profiler
+      ),
+      'C-calculateAmountsToBeDeposited',
+      []
     );
 
     let orcaAmountA = aAmounts.div(new Decimal(10).pow(tokenADecimals));
@@ -3678,16 +3937,22 @@ export class Kamino {
     let ratio = orcaAmountA.div(orcaAmountB);
     ratio = ratio.div(priceBInA);
 
-    let totalUserDepositInA = aAmount.add(bAmount.mul(priceBInA));
+    // multiply by tokens delta to make sure that both values uses the same about of decimals
+    let totalUserDepositInA = aAmount
+      .mul(10 ** tokenAAddDecimals)
+      .add(bAmount.mul(10 ** tokenBAddDecimals).mul(priceBInA));
 
-    let requiredAAmountToDeposit = totalUserDepositInA.mul(ratio).div(ratio.add(1));
-    let requiredBAmountToDeposit = totalUserDepositInA.sub(requiredAAmountToDeposit).mul(priceAInB);
-    requiredBAmountToDeposit = requiredBAmountToDeposit.div(new Decimal(10).pow(tokenADecimalsDiff));
+    let requiredAAmountToDeposit = totalUserDepositInA
+      .mul(ratio)
+      .div(ratio.add(1))
+      .div(10 ** tokenAAddDecimals);
+    let requiredBAmountToDeposit = totalUserDepositInA
+      .sub(requiredAAmountToDeposit.mul(10 ** tokenAAddDecimals))
+      .div(10 ** tokenBAddDecimals)
+      .mul(priceAInB);
 
     let tokenAToSwapAmount = requiredAAmountToDeposit.sub(tokenAAmountUserDeposit);
-    let tokenBToSwapAmount = requiredBAmountToDeposit.sub(
-      tokenBAmountUserDeposit.div(new Decimal(10).pow(tokenADecimalsDiff))
-    );
+    let tokenBToSwapAmount = requiredBAmountToDeposit.sub(tokenBAmountUserDeposit);
 
     let depositAmountsForSwap: DepositAmountsForSwap = {
       requiredAAmountToDeposit,
@@ -3770,13 +4035,14 @@ export class Kamino {
   calculateAmountsToBeDeposited = async (
     strategy: PublicKey | StrategyWithAddress,
     tokenAAmount?: Decimal,
-    tokenBAmount?: Decimal
+    tokenBAmount?: Decimal,
+    profiledFunctionExecution: ProfiledFunctionExecution = noopProfiledFunctionExecution
   ): Promise<[Decimal, Decimal]> => {
     const { strategy: strategyState } = await this.getStrategyStateIfNotFetched(strategy);
     if (strategyState.shareCalculationMethod === DOLAR_BASED) {
-      return this.calculateDepostAmountsDollarBased(strategy, tokenAAmount, tokenBAmount);
+      return this.calculateDepostAmountsDollarBased(strategy, tokenAAmount, tokenBAmount, profiledFunctionExecution);
     } else if (strategyState.shareCalculationMethod === PROPORTION_BASED) {
-      return this.calculateDepositAmountsProportional(strategy, tokenAAmount, tokenBAmount);
+      return this.calculateDepositAmountsProportional(strategy, tokenAAmount, tokenBAmount, profiledFunctionExecution);
     } else {
       throw new Error('Invalid share calculation method');
     }
@@ -3785,18 +4051,23 @@ export class Kamino {
   calculateDepositAmountsProportional = async (
     strategy: PublicKey | StrategyWithAddress,
     tokenAAmount?: Decimal,
-    tokenBAmount?: Decimal
+    tokenBAmount?: Decimal,
+    profiler: ProfiledFunctionExecution = noopProfiledFunctionExecution
   ): Promise<[Decimal, Decimal]> => {
     if (!tokenAAmount && !tokenBAmount) {
       return [new Decimal(0), new Decimal(0)];
     }
 
-    let totalHoldings = await this.getStrategyTokensHoldings(strategy);
+    let totalHoldings = await profiler(this.getStrategyTokensHoldings(strategy), 'getStrategyTokensHoldings', []);
     // if we have no holdings, on the initial deposit we use the old method
     if (totalHoldings.a.eq(ZERO) && totalHoldings.b.eq(ZERO)) {
       return await this.calculateDepostAmountsDollarBased(strategy, tokenAAmount, tokenBAmount);
     }
-    return await this.calculateDepositAmountsProportionalWithTotalTokens(totalHoldings, tokenAAmount, tokenBAmount);
+    return await profiler(
+      this.calculateDepositAmountsProportionalWithTotalTokens(totalHoldings, tokenAAmount, tokenBAmount),
+      'C-calculateDepositAmountsProportionalWithTotalTokens',
+      []
+    );
   };
 
   private calculateDepositAmountsProportionalWithTotalTokens = async (
@@ -3830,7 +4101,8 @@ export class Kamino {
   calculateDepostAmountsDollarBased = async (
     strategy: PublicKey | StrategyWithAddress,
     tokenAAmount?: Decimal,
-    tokenBAmount?: Decimal
+    tokenBAmount?: Decimal,
+    profiledFunctionExecution: ProfiledFunctionExecution = noopProfiledFunctionExecution
   ): Promise<[Decimal, Decimal]> => {
     const { strategy: strategyState } = await this.getStrategyStateIfNotFetched(strategy);
     const dex = Number(strategyState.strategyDex);

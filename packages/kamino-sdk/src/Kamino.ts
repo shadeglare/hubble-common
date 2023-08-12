@@ -101,6 +101,8 @@ import {
   ProfiledFunctionExecution,
   noopProfiledFunctionExecution,
   MaybeTokensBalances,
+  NativePendingFeesAndRewards,
+  PendingFeesAndRewards,
 } from './utils';
 import { ASSOCIATED_TOKEN_PROGRAM_ID, Token, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import {

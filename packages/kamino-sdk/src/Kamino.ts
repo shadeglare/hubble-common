@@ -4738,7 +4738,7 @@ export class Kamino {
       return null;
     }
 
-    const ownerSharesAta = await getAssociatedTokenAddress(strategy.sharesMint, owner);
+    const ownerSharesAta = getAssociatedTokenAddress(strategy.sharesMint, owner);
     const ownerShares = await this.getTokenAccountBalance(ownerSharesAta);
     if (ownerShares.isZero()) {
       throw new Error('Owner balance should be more than zero');

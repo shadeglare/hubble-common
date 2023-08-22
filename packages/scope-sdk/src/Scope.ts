@@ -17,6 +17,7 @@ export class Scope {
     { id: 1, pair: 'ETH/USD', name: 'ETH', price: new Decimal(0) },
     { id: 2, pair: 'BTC/USD', name: 'BTC', price: new Decimal(0) },
     { id: 2, pair: 'wBTC/USD', name: 'wBTC', price: new Decimal(0) },
+    { id: 2, pair: 'tBTC/USD', name: 'tBTC', price: new Decimal(0) }, // use the same scope ID as wBTC
     { id: 3, pair: 'SRM/USD', name: 'SRM', price: new Decimal(0) },
     { id: 4, pair: 'RAY/USD', name: 'RAY', price: new Decimal(0) },
     { id: 5, pair: 'FTT/USD', name: 'FTT', price: new Decimal(0) },
@@ -107,6 +108,16 @@ export class Scope {
     { id: 93, pair: 'STEPTwap/USD', name: 'STEPTwap', price: new Decimal(0) },
     { id: 94, pair: 'FORGE/USD', name: 'FORGE', price: new Decimal(0) },
     { id: 95, pair: 'FORGETwap/USD', name: 'FORGETwap', price: new Decimal(0) },
+    { id: 96, pair: 'COCO/USD', name: 'COCO', price: new Decimal(0) },
+    { id: 97, pair: 'COCOTwap/USD', name: 'COCOTwap', price: new Decimal(0) },
+    { id: 98, pair: 'STYLE/USD', name: 'STYLE', price: new Decimal(0) },
+    { id: 99, pair: 'STYLETwap/USD', name: 'STYLETwap', price: new Decimal(0) },
+    { id: 100, pair: 'CHAI/USD', name: 'CHAI', price: new Decimal(0) },
+    { id: 101, pair: 'CHAITwap/USD', name: 'CHAITwap', price: new Decimal(0) },
+    { id: 102, pair: 'T/USD', name: 'T', price: new Decimal(0) },
+    { id: 103, pair: 'TTwap/USD', name: 'TTwap', price: new Decimal(0) },
+    { id: 104, pair: 'BLZE/USD', name: 'BLZE', price: new Decimal(0) },
+    { id: 105, pair: 'BLZETwap/USD', name: 'BLZETwap', price: new Decimal(0) },
   ];
 
   /**
